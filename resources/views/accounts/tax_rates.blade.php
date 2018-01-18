@@ -9,8 +9,9 @@
   {{ Former::populate($account) }}
   {{ Former::populateField('invoice_taxes', intval($account->invoice_taxes)) }}
   {{ Former::populateField('invoice_item_taxes', intval($account->invoice_item_taxes)) }}
-  {{ Former::populateField('show_item_taxes', intval($account->show_item_taxes)) }}
   {{ Former::populateField('enable_second_tax_rate', intval($account->enable_second_tax_rate)) }}
+  {{ Former::populateField('include_item_taxes_inline', intval($account->include_item_taxes_inline)) }}
+  {{ Former::populateField('inclusive_taxes', intval($account->inclusive_taxes)) }}
 
 
   <div class="panel panel-default">
@@ -19,31 +20,41 @@
   </div>
   <div class="panel-body">
 
-      {!! Former::checkbox('invoice_taxes')
-            ->text(trans('texts.enable_invoice_tax'))
-            ->label('&nbsp;') !!}
+    {!! Former::checkbox('invoice_taxes')
+        ->text(trans('texts.enable_invoice_tax'))
+        ->label('&nbsp;')
+        ->value(1) !!}
 
-      {!! Former::checkbox('invoice_item_taxes')
-            ->text(trans('texts.enable_line_item_tax'))
-            ->label('&nbsp;') !!}
+    {!! Former::checkbox('invoice_item_taxes')
+        ->text(trans('texts.enable_line_item_tax'))
+        ->label('&nbsp;')
+        ->value(1) !!}
 
-      {!! Former::checkbox('show_item_taxes')
-            ->text(trans('texts.show_line_item_tax'))
-            ->label('&nbsp;') !!}
+    {!! Former::checkbox('enable_second_tax_rate')
+        ->text(trans('texts.enable_second_tax_rate'))
+        ->label('&nbsp;')
+        ->value(1) !!}
 
-        {!! Former::checkbox('enable_second_tax_rate')
-              ->text(trans('texts.enable_second_tax_rate'))
-              ->label('&nbsp;') !!}
+    {!! Former::checkbox('include_item_taxes_inline')
+        ->text(trans('texts.include_item_taxes_inline'))
+        ->label('&nbsp;')
+        ->value(1) !!}
+
+    @if (! $hasInclusiveTaxRates && $countInvoices == 0)
+        {!! Former::checkbox('inclusive_taxes')
+            ->text(trans('texts.inclusive_taxes_help'))
+            ->label('&nbsp;')
+            ->help('inclusive_taxes_notice')
+            ->value(1) !!}
+    @endif
 
       &nbsp;
 
-      {!! Former::select('default_tax_rate_id')
-            ->style('max-width: 250px')
-            ->addOption('', '')
-            ->fromQuery($taxRates, function($model) { return $model->name . ': ' . $model->rate . '%'; }, 'id') !!}
+      @if ($taxRates->count())
+          @include('partials.tax_rates', ['taxRateLabel' => trans('texts.default_tax_rate_id')])
+          &nbsp;
+      @endif
 
-
-      &nbsp;
       {!! Former::actions( Button::success(trans('texts.save'))->submit()->appendIcon(Icon::create('floppy-disk')) ) !!}
       {!! Former::close() !!}
   </div>
@@ -60,12 +71,13 @@
       ->addColumn(
         trans('texts.name'),
         trans('texts.rate'),
+        trans('texts.type'),
         trans('texts.action'))
       ->setUrl(url('api/tax_rates/'))
       ->setOptions('sPaginationType', 'bootstrap')
       ->setOptions('bFilter', false)
       ->setOptions('bAutoWidth', false)
-      ->setOptions('aoColumns', [[ "sWidth"=> "40%" ], [ "sWidth"=> "40%" ], ["sWidth"=> "20%"]])
+      ->setOptions('aoColumns', [[ "sWidth"=> "25%" ], [ "sWidth"=> "25%" ], ["sWidth"=> "25%"], ["sWidth"=> "25%"]])
       ->setOptions('aoColumnDefs', [['bSortable'=>false, 'aTargets'=>[2]]])
       ->render('datatable') !!}
 
@@ -73,5 +85,15 @@
     window.onDatatableReady = actionListHandler;
   </script>
 
+
+  <script type="text/javascript">
+    $(function() {
+        @if ($countInvoices > 0)
+            $('#inclusive_taxes').change(function() {
+                swal("{{ trans('texts.inclusive_taxes_warning') }}");
+            })
+        @endif
+    })
+  </script>
 
 @stop

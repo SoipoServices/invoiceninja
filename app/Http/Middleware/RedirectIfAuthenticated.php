@@ -1,18 +1,19 @@
-<?php namespace App\Http\Middleware;
+<?php
 
-use Illuminate\Http\Request;
-use Session;
-use Closure;
+namespace App\Http\Middleware;
+
 use App\Models\Client;
+use Closure;
 use Illuminate\Contracts\Auth\Guard;
 use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Session;
 
 /**
- * Class RedirectIfAuthenticated
+ * Class RedirectIfAuthenticated.
  */
 class RedirectIfAuthenticated
 {
-
     /**
      * The Guard implementation.
      *
@@ -23,7 +24,7 @@ class RedirectIfAuthenticated
     /**
      * Create a new filter instance.
      *
-     * @param  Guard $auth
+     * @param Guard $auth
      */
     public function __construct(Guard $auth)
     {
@@ -33,19 +34,28 @@ class RedirectIfAuthenticated
     /**
      * Handle an incoming request.
      *
-     * @param  Request $request
-     * @param  Closure $next
+     * @param Request $request
+     * @param Closure $next
+     *
      * @return mixed
      */
-    public function handle(Request $request, Closure $next)
+    public function handle(Request $request, Closure $next, $guard = null)
     {
-        if ($this->auth->check() && Client::scope()->count() > 0) {
+        if (auth()->guard($guard)->check()) {
             Session::reflash();
 
-            return new RedirectResponse(url('/dashboard'));
+            switch ($guard) {
+                case 'client':
+                    if (session('contact_key')) {
+                        return redirect('/client/dashboard');
+                    }
+                    break;
+                default:
+                    return redirect('/dashboard');
+                    break;
+            }
         }
 
         return $next($request);
     }
-
 }

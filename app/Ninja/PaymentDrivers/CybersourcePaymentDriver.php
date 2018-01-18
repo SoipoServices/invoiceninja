@@ -1,4 +1,8 @@
-<?php namespace App\Ninja\PaymentDrivers;
+<?php
+
+namespace App\Ninja\PaymentDrivers;
+
+use Exception;
 
 class CybersourcePaymentDriver extends BasePaymentDriver
 {

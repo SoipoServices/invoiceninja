@@ -1,20 +1,49 @@
-<?php namespace App\Models;
+<?php
 
-use Illuminate\Database\Eloquent\SoftDeletes;
+namespace App\Models;
+
 use Eloquent;
+use Illuminate\Database\Eloquent\SoftDeletes;
 
 /**
- * Class Subscription
+ * Class Subscription.
  */
-class Subscription extends Eloquent
+class Subscription extends EntityModel
 {
     /**
      * @var bool
      */
     public $timestamps = true;
+
     use SoftDeletes;
+
     /**
      * @var array
      */
     protected $dates = ['deleted_at'];
+
+    /**
+     * @var array
+     */
+    protected $fillable = [
+        'event_id',
+        'target_url',
+    ];
+
+    /**
+     * @return mixed
+     */
+    public function getEntityType()
+    {
+        return ENTITY_SUBSCRIPTION;
+    }
+
+    /**
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
+     */
+    public function account()
+    {
+        return $this->belongsTo('App\Models\Account');
+    }
+
 }

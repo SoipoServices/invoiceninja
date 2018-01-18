@@ -3,7 +3,10 @@
 @section('head')
     @parent
 
-    @if ($client->hasAddress())
+    <script src="{{ asset('js/select2.min.js') }}" type="text/javascript"></script>
+    <link href="{{ asset('css/select2.css') }}" rel="stylesheet" type="text/css"/>
+
+    @if ($client->showMap())
         <style>
           #map {
             width: 100%;
@@ -23,12 +26,10 @@
 
     <div class="row">
         <div class="col-md-7">
-            <div>
-                <span style="font-size:28px">{{ $client->getDisplayName() }}</span>
-                @if ($client->trashed())
-                    &nbsp;&nbsp;{!! $client->present()->status !!}
-                @endif
-            </div>
+            <ol class="breadcrumb">
+              <li>{{ link_to('/clients', trans('texts.clients')) }}</li>
+              <li class='active'>{{ $client->getDisplayName() }}</li> {!! $client->present()->statusLabel !!}
+            </ol>
         </div>
         <div class="col-md-5">
             <div class="pull-right">
@@ -44,26 +45,34 @@
                             ->withAttributes(['target' => '_blank']) !!}
                 @endif
 
+                @if ( ! $client->is_deleted)
+                    @can('edit', $client)
+                        {!! DropdownButton::normal(trans('texts.edit_client'))
+                            ->withAttributes(['class'=>'normalDropDown'])
+                            ->withContents([
+                              ($client->trashed() ? false : ['label' => trans('texts.archive_client'), 'url' => "javascript:onArchiveClick()"]),
+                              ['label' => trans('texts.delete_client'), 'url' => "javascript:onDeleteClick()"],
+                            ]
+                          )->split() !!}
+                    @endcan
+                    @if ( ! $client->trashed())
+                        @can('create', ENTITY_INVOICE)
+                            {!! DropdownButton::primary(trans('texts.view_statement'))
+                                    ->withAttributes(['class'=>'primaryDropDown'])
+                                    ->withContents($actionLinks)->split() !!}
+                        @endcan
+                    @endif
+                @endif
+
                 @if ($client->trashed())
                     @can('edit', $client)
-                        {!! Button::primary(trans('texts.restore_client'))->withAttributes(['onclick' => 'onRestoreClick()']) !!}
-                    @endcan
-                @else
-                    @can('edit', $client)
-                    {!! DropdownButton::normal(trans('texts.edit_client'))
-                        ->withAttributes(['class'=>'normalDropDown'])
-                        ->withContents([
-                          ['label' => trans('texts.archive_client'), 'url' => "javascript:onArchiveClick()"],
-                          ['label' => trans('texts.delete_client'), 'url' => "javascript:onDeleteClick()"],
-                        ]
-                      )->split() !!}
-                    @endcan
-                    @can('create', ENTITY_INVOICE)
-                        {!! DropdownButton::primary(trans('texts.new_invoice'))
-                                ->withAttributes(['class'=>'primaryDropDown'])
-                                ->withContents($actionLinks)->split() !!}
+                        {!! Button::primary(trans('texts.restore_client'))
+                                ->appendIcon(Icon::create('cloud-download'))
+                                ->withAttributes(['onclick' => 'onRestoreClick()']) !!}
                     @endcan
                 @endif
+
+
               {!! Former::close() !!}
 
             </div>
@@ -75,7 +84,6 @@
 		{{ trans('texts.last_logged_in') }} {{ Utils::timestampToDateTimeString(strtotime($client->last_login)) }}
 	</small></h3>
 	@endif
-    <br/>
 
     <div class="panel panel-default">
     <div class="panel-body">
@@ -90,19 +98,6 @@
 		  	   <p><i class="fa fa-vat-number" style="width: 20px"></i>{{ trans('texts.vat_number').': '.$client->vat_number }}</p>
             @endif
 
-            @if ($client->address1)
-                {{ $client->address1 }}<br/>
-            @endif
-            @if ($client->address2)
-                {{ $client->address2 }}<br/>
-            @endif
-            @if ($client->getCityState())
-                {{ $client->getCityState() }}<br/>
-            @endif
-            @if ($client->country)
-                {{ $client->country->name }}<br/>
-            @endif
-
             @if ($client->account->custom_client_label1 && $client->custom_value1)
                 {{ $client->account->custom_client_label1 . ': ' . $client->custom_value1 }}<br/>
             @endif
@@ -114,8 +109,18 @@
                 <i class="fa fa-phone" style="width: 20px"></i>{{ $client->work_phone }}
             @endif
 
+            @if (floatval($client->task_rate))
+                <p>{{ trans('texts.task_rate') }}: {{ Utils::roundSignificant($client->task_rate) }}</p>
+            @endif
+
+            <p/>
+
+            @if ($client->public_notes)
+                <p><i>{!! nl2br(e($client->public_notes)) !!}</i></p>
+            @endif
+
             @if ($client->private_notes)
-                <p><i>{{ $client->private_notes }}</i></p>
+                <p><i>{!! nl2br(e($client->private_notes)) !!}</i></p>
             @endif
 
   	        @if ($client->client_industry)
@@ -133,8 +138,25 @@
                 <p><i class="fa fa-language" style="width: 20px"></i>{{ $client->language->name }}</p>
             @endif
 
-		  	<p>{{ $client->payment_terms ? trans('texts.payment_terms') . ": Net " . $client->payment_terms : '' }}</p>
+            <p>{{ $client->present()->paymentTerms }}</p>
+
+            <div class="text-muted" style="padding-top:8px">
+            @if ($client->show_tasks_in_portal)
+                • {{ trans('texts.can_view_tasks') }}<br/>
+            @endif
+            @if ($client->account->hasReminders() && ! $client->send_reminders)
+                • {{ trans('texts.is_not_sent_reminders') }}</br>
+            @endif
+            </div>
 		</div>
+
+        <div class="col-md-3">
+			<h3>{{ trans('texts.address') }}</h3>
+
+            {!! $client->present()->address(ADDRESS_BILLING) !!}<br/>
+            {!! $client->present()->address(ADDRESS_SHIPPING) !!}
+
+        </div>
 
 		<div class="col-md-3">
 			<h3>{{ trans('texts.contacts') }}</h3>
@@ -148,13 +170,24 @@
                 @if ($contact->phone)
                     <i class="fa fa-phone" style="width: 20px"></i>{{ $contact->phone }}<br/>
                 @endif
-                @if ($client->account->enable_client_portal)
-                    <i class="fa fa-dashboard" style="width: 20px"></i><a href="{{ $contact->link }}" target="_blank">{{ trans('texts.view_client_portal') }}</a><br/>
+
+                @if ($client->account->custom_contact_label1 && $contact->custom_value1)
+                    {{ $client->account->custom_contact_label1 . ': ' . $contact->custom_value1 }}<br/>
                 @endif
+                @if ($client->account->custom_contact_label2 && $contact->custom_value2)
+                    {{ $client->account->custom_contact_label2 . ': ' . $contact->custom_value2 }}<br/>
+                @endif
+
+                @if (Auth::user()->confirmed && $client->account->enable_client_portal)
+                    <i class="fa fa-dashboard" style="width: 20px"></i><a href="{{ $contact->link }}"
+                        onclick="window.open('{{ $contact->link }}?silent=true', '_blank');return false;">{{ trans('texts.view_client_portal') }}
+                    </a><br/>
+                @endif
+                <br/>
 		  	@endforeach
 		</div>
 
-		<div class="col-md-4">
+		<div class="col-md-3">
 			<h3>{{ trans('texts.standing') }}
 			<table class="table" style="width:100%">
 				<tr>
@@ -178,28 +211,30 @@
     </div>
     </div>
 
-    @if ($client->hasAddress())
+    @if ($client->showMap())
         <div id="map"></div>
         <br/>
     @endif
 
 	<ul class="nav nav-tabs nav-justified">
 		{!! Form::tab_link('#activity', trans('texts.activity'), true) !!}
-        @if ($hasTasks)
+        @if ($hasTasks && Utils::isPro())
             {!! Form::tab_link('#tasks', trans('texts.tasks')) !!}
         @endif
 		@if ($hasQuotes && Utils::isPro())
 			{!! Form::tab_link('#quotes', trans('texts.quotes')) !!}
 		@endif
+        @if ($hasRecurringInvoices)
+            {!! Form::tab_link('#recurring_invoices', trans('texts.recurring')) !!}
+        @endif
 		{!! Form::tab_link('#invoices', trans('texts.invoices')) !!}
 		{!! Form::tab_link('#payments', trans('texts.payments')) !!}
 		{!! Form::tab_link('#credits', trans('texts.credits')) !!}
-	</ul>
+	</ul><br/>
 
 	<div class="tab-content">
 
         <div class="tab-pane active" id="activity">
-
 			{!! Datatable::table()
 		    	->addColumn(
 		    		trans('texts.date'),
@@ -208,121 +243,69 @@
 		    		trans('texts.adjustment'))
 		    	->setUrl(url('api/activities/'. $client->public_id))
                 ->setCustomValues('entityType', 'activity')
+                ->setCustomValues('clientId', $client->public_id)
+                ->setCustomValues('rightAlign', [2, 3])
 		    	->setOptions('sPaginationType', 'bootstrap')
 		    	->setOptions('bFilter', false)
 		    	->setOptions('aaSorting', [['0', 'desc']])
 		    	->render('datatable') !!}
-
         </div>
 
     @if ($hasTasks)
         <div class="tab-pane" id="tasks">
-
-            {!! Datatable::table()
-                ->addColumn(
-                    trans('texts.date'),
-                    trans('texts.duration'),
-                    trans('texts.description'),
-                    trans('texts.status'))
-                ->setUrl(url('api/tasks/'. $client->public_id))
-                ->setCustomValues('entityType', 'tasks')
-                ->setOptions('sPaginationType', 'bootstrap')
-                ->setOptions('bFilter', false)
-                ->setOptions('aaSorting', [['0', 'desc']])
-                ->render('datatable') !!}
-
+            @include('list', [
+                'entityType' => ENTITY_TASK,
+                'datatable' => new \App\Ninja\Datatables\TaskDatatable(true, true),
+                'clientId' => $client->public_id,
+            ])
         </div>
     @endif
 
 
     @if (Utils::hasFeature(FEATURE_QUOTES) && $hasQuotes)
         <div class="tab-pane" id="quotes">
+            @include('list', [
+                'entityType' => ENTITY_QUOTE,
+                'datatable' => new \App\Ninja\Datatables\InvoiceDatatable(true, true, ENTITY_QUOTE),
+                'clientId' => $client->public_id,
+            ])
+        </div>
+    @endif
 
-			{!! Datatable::table()
-		    	->addColumn(
-	    			trans('texts.quote_number'),
-	    			trans('texts.quote_date'),
-	    			trans('texts.total'),
-	    			trans('texts.valid_until'),
-	    			trans('texts.status'))
-		    	->setUrl(url('api/quotes/'. $client->public_id))
-                ->setCustomValues('entityType', 'quotes')
-		    	->setOptions('sPaginationType', 'bootstrap')
-		    	->setOptions('bFilter', false)
-		    	->setOptions('aaSorting', [['0', 'desc']])
-		    	->render('datatable') !!}
-
+    @if ($hasRecurringInvoices)
+        <div class="tab-pane" id="recurring_invoices">
+            @include('list', [
+                'entityType' => ENTITY_RECURRING_INVOICE,
+                'datatable' => new \App\Ninja\Datatables\RecurringInvoiceDatatable(true, true),
+                'clientId' => $client->public_id,
+            ])
         </div>
     @endif
 
 		<div class="tab-pane" id="invoices">
-
-			@if ($hasRecurringInvoices)
-				{!! Datatable::table()
-			    	->addColumn(
-			    		trans('texts.frequency_id'),
-			    		trans('texts.start_date'),
-			    		trans('texts.end_date'),
-			    		trans('texts.invoice_total'))
-			    	->setUrl(url('api/recurring_invoices/' . $client->public_id))
-                    ->setCustomValues('entityType', 'recurring_invoices')
-			    	->setOptions('sPaginationType', 'bootstrap')
-			    	->setOptions('bFilter', false)
-			    	->setOptions('aaSorting', [['0', 'asc']])
-			    	->render('datatable') !!}
-			@endif
-
-			{!! Datatable::table()
-		    	->addColumn(
-		    			trans('texts.invoice_number'),
-		    			trans('texts.invoice_date'),
-		    			trans('texts.invoice_total'),
-		    			trans('texts.balance_due'),
-		    			trans('texts.due_date'),
-		    			trans('texts.status'))
-		    	->setUrl(url('api/invoices/' . $client->public_id))
-                ->setCustomValues('entityType', 'invoices')
-		    	->setOptions('sPaginationType', 'bootstrap')
-		    	->setOptions('bFilter', false)
-		    	->setOptions('aaSorting', [['0', 'desc']])
-		    	->render('datatable') !!}
-
+            @include('list', [
+                'entityType' => ENTITY_INVOICE,
+                'datatable' => new \App\Ninja\Datatables\InvoiceDatatable(true, true),
+                'clientId' => $client->public_id,
+            ])
         </div>
+
         <div class="tab-pane" id="payments">
-
-	    	{!! Datatable::table()
-						->addColumn(
-			    			trans('texts.invoice'),
-			    			trans('texts.transaction_reference'),
-			    			trans('texts.method'),
-                            trans('texts.source'),
-			    			trans('texts.payment_amount'),
-			    			trans('texts.payment_date'),
-                            trans('texts.status'))
-				->setUrl(url('api/payments/' . $client->public_id))
-                ->setCustomValues('entityType', 'payments')
-				->setOptions('sPaginationType', 'bootstrap')
-				->setOptions('bFilter', false)
-				->setOptions('aaSorting', [['0', 'desc']])
-				->render('datatable') !!}
-
+            @include('list', [
+                'entityType' => ENTITY_PAYMENT,
+                'datatable' => new \App\Ninja\Datatables\PaymentDatatable(true, true),
+                'clientId' => $client->public_id,
+            ])
         </div>
+
         <div class="tab-pane" id="credits">
-
-	    	{!! Datatable::table()
-						->addColumn(
-								trans('texts.credit_amount'),
-								trans('texts.credit_balance'),
-								trans('texts.credit_date'),
-								trans('texts.private_notes'))
-				->setUrl(url('api/credits/' . $client->public_id))
-                ->setCustomValues('entityType', 'credits')
-				->setOptions('sPaginationType', 'bootstrap')
-				->setOptions('bFilter', false)
-				->setOptions('aaSorting', [['0', 'asc']])
-				->render('datatable') !!}
-
+            @include('list', [
+                'entityType' => ENTITY_CREDIT,
+                'datatable' => new \App\Ninja\Datatables\CreditDatatable(true, true),
+                'clientId' => $client->public_id,
+            ])
         </div>
+
     </div>
 
 	<script type="text/javascript">
@@ -330,29 +313,31 @@
     var loadedTabs = {};
 
 	$(function() {
-		$('.normalDropDown:not(.dropdown-toggle)').click(function() {
-			window.location = '{{ URL::to('clients/' . $client->public_id . '/edit') }}';
+		$('.normalDropDown:not(.dropdown-toggle)').click(function(event) {
+            openUrlOnClick('{{ URL::to('clients/' . $client->public_id . '/edit') }}', event);
 		});
-		$('.primaryDropDown:not(.dropdown-toggle)').click(function() {
-			window.location = '{{ URL::to('invoices/create/' . $client->public_id ) }}';
+		$('.primaryDropDown:not(.dropdown-toggle)').click(function(event) {
+            openUrlOnClick('{{ URL::to('clients/statement/' . $client->public_id ) }}', event);
 		});
 
         // load datatable data when tab is shown and remember last tab selected
         $('a[data-toggle="tab"]').on('shown.bs.tab', function (e) {
           var target = $(e.target).attr("href") // activated tab
           target = target.substring(1);
-          localStorage.setItem('client_tab', target);
-          if (!loadedTabs.hasOwnProperty(target)) {
+          if (isStorageSupported()) {
+              localStorage.setItem('client_tab', target);
+          }
+          if (!loadedTabs.hasOwnProperty(target) && window['load_' + target]) {
             loadedTabs[target] = true;
             window['load_' + target]();
-            if (target == 'invoices' && window.hasOwnProperty('load_recurring_invoices')) {
-                window['load_recurring_invoices']();
-            }
           }
         });
-        var tab = localStorage.getItem('client_tab') || '';
-        var selector = '.nav-tabs a[href="#' + tab.replace('#', '') + '"]';
-        if (tab && tab != 'activity' && $(selector).length) {
+
+        var tab = window.location.hash || (localStorage.getItem('client_tab') || '');
+        tab = tab.replace('#', '');
+        var selector = '.nav-tabs a[href="#' + tab + '"]';
+
+        if (tab && tab != 'activity' && $(selector).length && window['load_' + tab]) {
             $(selector).tab('show');
         } else {
             window['load_activity']();
@@ -370,13 +355,13 @@
 	}
 
 	function onDeleteClick() {
-		if (confirm("{!! trans('texts.are_you_sure') !!}")) {
+		sweetConfirm(function() {
 			$('#action').val('delete');
 			$('.mainForm').submit();
-		}
+		});
 	}
 
-    @if ($client->hasAddress())
+    @if ($client->showMap())
         function initialize() {
             var mapCanvas = document.getElementById('map');
             var mapOptions = {
@@ -386,7 +371,7 @@
             };
 
             var map = new google.maps.Map(mapCanvas, mapOptions)
-            var address = "{{ "{$client->address1} {$client->address2} {$client->city} {$client->state} {$client->postal_code} " . ($client->country ? $client->country->name : '') }}";
+            var address = {!! json_encode(e("{$client->address1} {$client->address2} {$client->city} {$client->state} {$client->postal_code} " . ($client->country ? $client->country->name : ''))) !!};
 
             geocoder = new google.maps.Geocoder();
             geocoder.geocode( { 'address': address}, function(results, status) {

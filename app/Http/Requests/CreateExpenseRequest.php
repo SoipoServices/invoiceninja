@@ -1,8 +1,11 @@
-<?php namespace App\Http\Requests;
+<?php
+
+namespace App\Http\Requests;
 
 class CreateExpenseRequest extends ExpenseRequest
 {
-    // Expenses 
+    // Expenses
+
     /**
      * Determine if the user is authorized to make this request.
      *
@@ -20,8 +23,6 @@ class CreateExpenseRequest extends ExpenseRequest
      */
     public function rules()
     {
-        return [
-            'amount' => 'numeric',
-        ];
+        return [];
     }
 }

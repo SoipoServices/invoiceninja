@@ -1,10 +1,12 @@
-<?php namespace App\Models;
+<?php
+
+namespace App\Models;
 
 use Cache;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 /**
- * Class PaymentMethod
+ * Class PaymentMethod.
  */
 class PaymentMethod extends EntityModel
 {
@@ -19,10 +21,25 @@ class PaymentMethod extends EntityModel
      * @var array
      */
     protected $dates = ['deleted_at'];
+
     /**
      * @var array
      */
     protected $hidden = ['id'];
+
+    /**
+     * @var array
+     */
+    protected $fillable = [
+        'contact_id',
+        'payment_type_id',
+        'source_reference',
+        'last4',
+        'expiration',
+        'email',
+        'currency_id',
+    ];
+
 
     /**
      * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
@@ -77,14 +94,16 @@ class PaymentMethod extends EntityModel
      */
     public function getBankDataAttribute()
     {
-        if (!$this->routing_number) {
+        if (! $this->routing_number) {
             return null;
         }
+
         return static::lookupBankData($this->routing_number);
     }
 
     /**
      * @param $bank_name
+     *
      * @return null
      */
     public function getBankNameAttribute($bank_name)
@@ -94,11 +113,12 @@ class PaymentMethod extends EntityModel
         }
         $bankData = $this->bank_data;
 
-        return $bankData?$bankData->name:null;
+        return $bankData ? $bankData->name : null;
     }
 
     /**
      * @param $value
+     *
      * @return null|string
      */
     public function getLast4Attribute($value)
@@ -109,11 +129,12 @@ class PaymentMethod extends EntityModel
     /**
      * @param $query
      * @param $clientId
+     *
      * @return mixed
      */
     public function scopeClientId($query, $clientId)
     {
-        $query->whereHas('contact', function($query) use ($clientId) {
+        $query->whereHas('contact', function ($query) use ($clientId) {
             $query->whereClientId($clientId);
         });
     }
@@ -141,9 +162,11 @@ class PaymentMethod extends EntityModel
 
     /**
      * @param $routingNumber
+     *
      * @return mixed|null|\stdClass|string
      */
-    public static function lookupBankData($routingNumber) {
+    public static function lookupBankData($routingNumber)
+    {
         $cached = Cache::get('bankData:'.$routingNumber);
 
         if ($cached != null) {
@@ -152,12 +175,12 @@ class PaymentMethod extends EntityModel
 
         $dataPath = base_path('vendor/gatepay/FedACHdir/FedACHdir.txt');
 
-        if (!file_exists($dataPath) || !$size = filesize($dataPath)) {
+        if (! file_exists($dataPath) || ! $size = filesize($dataPath)) {
             return 'Invalid data file';
         }
 
         $lineSize = 157;
-        $numLines = $size/$lineSize;
+        $numLines = $size / $lineSize;
 
         if ($numLines % 1 != 0) {
             // The number of lines should be an integer
@@ -178,7 +201,7 @@ class PaymentMethod extends EntityModel
 
             if ($thisNumber > $routingNumber) {
                 $high = $mid - 1;
-            } else if ($thisNumber < $routingNumber) {
+            } elseif ($thisNumber < $routingNumber) {
                 $low = $mid + 1;
             } else {
                 $data = new \stdClass();
@@ -196,11 +219,13 @@ class PaymentMethod extends EntityModel
             }
         }
 
-        if (!empty($data)) {
+        if (! empty($data)) {
             Cache::put('bankData:'.$routingNumber, $data, 5);
+
             return $data;
         } else {
             Cache::put('bankData:'.$routingNumber, false, 5);
+
             return null;
         }
     }
@@ -228,10 +253,10 @@ class PaymentMethod extends EntityModel
     }
 }
 
-PaymentMethod::deleting(function($paymentMethod) {
+PaymentMethod::deleting(function ($paymentMethod) {
     $accountGatewayToken = $paymentMethod->account_gateway_token;
     if ($accountGatewayToken->default_payment_method_id == $paymentMethod->id) {
-        $newDefault = $accountGatewayToken->payment_methods->first(function($i, $paymentMethdod) use ($accountGatewayToken){
+        $newDefault = $accountGatewayToken->payment_methods->first(function ($paymentMethdod) use ($accountGatewayToken) {
             return $paymentMethdod->id != $accountGatewayToken->default_payment_method_id;
         });
         $accountGatewayToken->default_payment_method_id = $newDefault ? $newDefault->id : null;

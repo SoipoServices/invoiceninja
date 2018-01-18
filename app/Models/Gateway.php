@@ -1,11 +1,13 @@
-<?php namespace App\Models;
+<?php
+
+namespace App\Models;
 
 use Eloquent;
 use Omnipay;
 use Utils;
 
 /**
- * Class Gateway
+ * Class Gateway.
  */
 class Gateway extends Eloquent
 {
@@ -13,6 +15,12 @@ class Gateway extends Eloquent
      * @var bool
      */
     public $timestamps = true;
+
+    protected $fillable = [
+        'provider',
+        'is_offsite',
+        'sort_order',
+    ];
 
     /**
      * @var array
@@ -24,6 +32,7 @@ class Gateway extends Eloquent
         GATEWAY_TYPE_BITCOIN,
         GATEWAY_TYPE_DWOLLA,
         GATEWAY_TYPE_TOKEN,
+        GATEWAY_TYPE_GOCARDLESS,
     ];
 
     // these will appear in the primary gateway select
@@ -33,12 +42,13 @@ class Gateway extends Eloquent
      */
     public static $preferred = [
         GATEWAY_PAYPAL_EXPRESS,
-        GATEWAY_BITPAY,
-        GATEWAY_DWOLLA,
         GATEWAY_STRIPE,
+        GATEWAY_WEPAY,
         GATEWAY_BRAINTREE,
         GATEWAY_AUTHORIZE_NET,
         GATEWAY_MOLLIE,
+        GATEWAY_GOCARDLESS,
+        GATEWAY_CUSTOM,
     ];
 
     // allow adding these gateway if another gateway
@@ -48,8 +58,10 @@ class Gateway extends Eloquent
      */
     public static $alternate = [
         GATEWAY_PAYPAL_EXPRESS,
+        GATEWAY_GOCARDLESS,
         GATEWAY_BITPAY,
         GATEWAY_DWOLLA,
+        GATEWAY_CUSTOM,
     ];
 
     /**
@@ -76,6 +88,8 @@ class Gateway extends Eloquent
         'developerMode',
         // Dwolla
         'sandbox',
+        // Payfast
+        'pdtKey',
     ];
 
     /**
@@ -88,6 +102,7 @@ class Gateway extends Eloquent
 
     /**
      * @param $gatewayId
+     *
      * @return bool
      */
     public function isGateway($gatewayId)
@@ -97,6 +112,7 @@ class Gateway extends Eloquent
 
     /**
      * @param $type
+     *
      * @return string
      */
     public static function getPaymentTypeName($type)
@@ -106,6 +122,7 @@ class Gateway extends Eloquent
 
     /**
      * @param $gatewayIds
+     *
      * @return int
      */
     public static function hasStandardGateway($gatewayIds)
@@ -122,7 +139,6 @@ class Gateway extends Eloquent
     public function scopePrimary($query, $accountGatewaysIds)
     {
         $query->where('payment_library_id', '=', 1)
-            ->where('id', '!=', GATEWAY_WEPAY)
             ->whereIn('id', static::$preferred)
             ->whereIn('id', $accountGatewaysIds);
     }
@@ -134,7 +150,6 @@ class Gateway extends Eloquent
     public function scopeSecondary($query, $accountGatewaysIds)
     {
         $query->where('payment_library_id', '=', 1)
-            ->where('id', '!=', GATEWAY_WEPAY)
             ->whereNotIn('id', static::$preferred)
             ->whereIn('id', $accountGatewaysIds);
     }
@@ -158,11 +173,15 @@ class Gateway extends Eloquent
             $link = 'https://www.dwolla.com/register';
         } elseif ($this->id == GATEWAY_SAGE_PAY_DIRECT || $this->id == GATEWAY_SAGE_PAY_SERVER) {
             $link = 'https://applications.sagepay.com/apply/2C02C252-0F8A-1B84-E10D-CF933EFCAA99';
+        } elseif ($this->id == GATEWAY_STRIPE) {
+            $link = 'https://dashboard.stripe.com/account/apikeys';
+        } elseif ($this->id == GATEWAY_WEPAY) {
+            $link = url('/gateways/create?wepay=true');
         }
 
         $key = 'texts.gateway_help_'.$this->id;
         $str = trans($key, [
-            'link' => "<a href='$link' target='_blank'>Click here</a>",
+            'link' => "<a href='$link' >Click here</a>",
             'complete_link' => url('/complete'),
         ]);
 
@@ -174,6 +193,18 @@ class Gateway extends Eloquent
      */
     public function getFields()
     {
-        return Omnipay::create($this->provider)->getDefaultParameters();
+        if ($this->isCustom()) {
+            return [
+                'name' => '',
+                'text' => '',
+            ];
+        } else {
+            return Omnipay::create($this->provider)->getDefaultParameters();
+        }
+    }
+
+    public function isCustom()
+    {
+        return $this->id === GATEWAY_CUSTOM;
     }
 }

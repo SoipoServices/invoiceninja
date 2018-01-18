@@ -1,12 +1,5 @@
 @extends('header')
 
-@section('head')
-    @parent
-
-    <link href="{{ asset('css/quill.snow.css') }}" rel="stylesheet" type="text/css"/>
-    <script src="{{ asset('js/quill.min.js') }}" type="text/javascript"></script>
-@stop
-
 @section('content')
 	@parent
 
@@ -23,10 +16,10 @@
             ->autocomplete('on')
             ->rules([
                 'name' => 'required',
-                'website' => 'url',
             ]) !!}
 
 	{{ Former::populate($account) }}
+	{{ Former::populateField('task_rate', floatval($account->task_rate) ? Utils::roundSignificant($account->task_rate) : '') }}
 
     @include('accounts.nav', ['selected' => ACCOUNT_COMPANY_DETAILS])
 
@@ -60,6 +53,7 @@
                 </div>
                 @endif
 
+
                 {!! Former::select('size_id')
                         ->addOption('','')
                         ->fromQuery($sizes, 'name', 'id') !!}
@@ -92,15 +86,24 @@
 
         <div class="panel panel-default">
           <div class="panel-heading">
-            <h3 class="panel-title">{!! trans('texts.signature') !!}</h3>
+            <h3 class="panel-title">{!! trans('texts.defaults') !!}</h3>
           </div>
-            <div class="panel-body">
+            <div class="panel-body form-padding-right">
 
-                <div class="col-md-10 col-md-offset-1">
-                    {!! Former::textarea('email_footer')->style('display:none')->raw() !!}
-                    <div id="signatureEditor" class="form-control" style="min-height:160px" onclick="focusEditor()"></div>
-                    @include('partials/quill_toolbar', ['name' => 'signature'])
-                </div>
+                {!! Former::select('payment_type_id')
+                        ->addOption('','')
+                        ->fromQuery($paymentTypes, 'name', 'id')
+                        ->help(trans('texts.payment_type_help')) !!}
+
+                {!! Former::select('payment_terms')
+                        ->addOption('','')
+                        ->fromQuery(\App\Models\PaymentTerm::getSelectOptions(), 'name', 'num_days')
+                        ->help(trans('texts.payment_terms_help') . ' | ' . link_to('/settings/payment_terms', trans('texts.customize_options'))) !!}
+
+				@if ($account->isModuleEnabled(ENTITY_TASK))
+					{!! Former::text('task_rate')
+					 		->help('task_rate_help')!!}
+				@endif
 
             </div>
         </div>
@@ -121,36 +124,14 @@
 
 	<script type="text/javascript">
 
-        var editor = false;
         $(function() {
             $('#country_id').combobox();
-
-            editor = new Quill('#signatureEditor', {
-                modules: {
-                    'toolbar': { container: '#signatureToolbar' },
-                    'link-tooltip': true
-                },
-                theme: 'snow'
-            });
-            editor.setHTML($('#email_footer').val());
-            editor.on('text-change', function(delta, source) {
-                if (source == 'api') {
-                    return;
-                }
-                var html = editor.getHTML();
-                $('#email_footer').val(html);
-                NINJA.formIsChanged = true;
-            });
         });
 
-        function focusEditor() {
-            editor.focus();
-        }
-
         function deleteLogo() {
-            if (confirm("{!! trans('texts.are_you_sure') !!}")) {
+            sweetConfirm(function() {
                 $('.removeLogoForm').submit();
-            }
+            });
         }
 
 	</script>

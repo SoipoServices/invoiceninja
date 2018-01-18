@@ -1,9 +1,11 @@
-<?php namespace App\Models;
+<?php
+
+namespace App\Models;
 
 use Eloquent;
 
 /**
- * Class Country
+ * Class Country.
  */
 class Country extends Eloquent
 {
@@ -21,7 +23,8 @@ class Country extends Eloquent
         'swap_postal_code',
         'swap_currency_symbol',
         'thousand_separator',
-        'decimal_separator'
+        'decimal_separator',
+        'iso_3166_3',
     ];
 
     /**
@@ -35,7 +38,7 @@ class Country extends Eloquent
     /**
      * @return mixed
      */
-    public function getName() 
+    public function getName()
     {
         return $this->name;
     }

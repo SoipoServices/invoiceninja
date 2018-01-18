@@ -1,16 +1,18 @@
-<?php namespace App\Providers;
+<?php
 
-use Illuminate\Contracts\Events\Dispatcher as DispatcherContract;
+namespace App\Providers;
+
 use Illuminate\Foundation\Support\Providers\EventServiceProvider as ServiceProvider;
 
-class EventServiceProvider extends ServiceProvider {
+class EventServiceProvider extends ServiceProvider
+{
+    /**
+     * The event handler mappings for the application.
+     *
+     * @var array
+     */
+    protected $listen = [
 
-	/**
-	 * The event handler mappings for the application.
-	 *
-	 * @var array
-	 */
-	protected $listen = [
         // Clients
         'App\Events\ClientWasCreated' => [
             'App\Listeners\ActivityListener@createdClient',
@@ -19,8 +21,12 @@ class EventServiceProvider extends ServiceProvider {
         'App\Events\ClientWasArchived' => [
             'App\Listeners\ActivityListener@archivedClient',
         ],
+        'App\Events\ClientWasUpdated' => [
+            'App\Listeners\SubscriptionListener@updatedClient',
+        ],
         'App\Events\ClientWasDeleted' => [
             'App\Listeners\ActivityListener@deletedClient',
+            'App\Listeners\SubscriptionListener@deletedClient',
         ],
         'App\Events\ClientWasRestored' => [
             'App\Listeners\ActivityListener@restoredClient',
@@ -29,12 +35,17 @@ class EventServiceProvider extends ServiceProvider {
         // Invoices
         'App\Events\InvoiceWasCreated' => [
             'App\Listeners\ActivityListener@createdInvoice',
-            'App\Listeners\SubscriptionListener@createdInvoice',
             'App\Listeners\InvoiceListener@createdInvoice',
         ],
         'App\Events\InvoiceWasUpdated' => [
             'App\Listeners\ActivityListener@updatedInvoice',
             'App\Listeners\InvoiceListener@updatedInvoice',
+        ],
+        'App\Events\InvoiceItemsWereCreated' => [
+            'App\Listeners\SubscriptionListener@createdInvoice',
+        ],
+        'App\Events\InvoiceItemsWereUpdated' => [
+            'App\Listeners\SubscriptionListener@updatedInvoice',
         ],
         'App\Events\InvoiceWasArchived' => [
             'App\Listeners\ActivityListener@archivedInvoice',
@@ -48,6 +59,7 @@ class EventServiceProvider extends ServiceProvider {
             'App\Listeners\ActivityListener@restoredInvoice',
         ],
         'App\Events\InvoiceWasEmailed' => [
+            'App\Listeners\InvoiceListener@emailedInvoice',
             'App\Listeners\NotificationListener@emailedInvoice',
         ],
         'App\Events\InvoiceInvitationWasEmailed' => [
@@ -62,10 +74,15 @@ class EventServiceProvider extends ServiceProvider {
         // Quotes
         'App\Events\QuoteWasCreated' => [
             'App\Listeners\ActivityListener@createdQuote',
-            'App\Listeners\SubscriptionListener@createdQuote',
         ],
         'App\Events\QuoteWasUpdated' => [
             'App\Listeners\ActivityListener@updatedQuote',
+        ],
+        'App\Events\QuoteItemsWereCreated' => [
+            'App\Listeners\SubscriptionListener@createdQuote',
+        ],
+        'App\Events\QuoteItemsWereUpdated' => [
+            'App\Listeners\SubscriptionListener@updatedQuote',
         ],
         'App\Events\QuoteWasArchived' => [
             'App\Listeners\ActivityListener@archivedQuote',
@@ -77,6 +94,7 @@ class EventServiceProvider extends ServiceProvider {
             'App\Listeners\ActivityListener@restoredQuote',
         ],
         'App\Events\QuoteWasEmailed' => [
+            'App\Listeners\QuoteListener@emailedQuote',
             'App\Listeners\NotificationListener@emailedQuote',
         ],
         'App\Events\QuoteInvitationWasEmailed' => [
@@ -90,6 +108,7 @@ class EventServiceProvider extends ServiceProvider {
         'App\Events\QuoteInvitationWasApproved' => [
             'App\Listeners\ActivityListener@approvedQuote',
             'App\Listeners\NotificationListener@approvedQuote',
+            'App\Listeners\SubscriptionListener@approvedQuote',
         ],
 
         // Payments
@@ -107,11 +126,11 @@ class EventServiceProvider extends ServiceProvider {
             'App\Listeners\ActivityListener@deletedPayment',
             'App\Listeners\InvoiceListener@deletedPayment',
             'App\Listeners\CreditListener@deletedPayment',
+            'App\Listeners\SubscriptionListener@deletedPayment',
         ],
         'App\Events\PaymentWasRefunded' => [
             'App\Listeners\ActivityListener@refundedPayment',
             'App\Listeners\InvoiceListener@refundedPayment',
-            'App\Listeners\CreditListener@refundedPayment',
         ],
         'App\Events\PaymentWasVoided' => [
             'App\Listeners\ActivityListener@voidedPayment',
@@ -129,7 +148,6 @@ class EventServiceProvider extends ServiceProvider {
         // Credits
         'App\Events\CreditWasCreated' => [
             'App\Listeners\ActivityListener@createdCredit',
-            'App\Listeners\SubscriptionListener@createdCredit',
         ],
         'App\Events\CreditWasArchived' => [
             'App\Listeners\ActivityListener@archivedCredit',
@@ -155,23 +173,82 @@ class EventServiceProvider extends ServiceProvider {
         // Task events
         'App\Events\TaskWasCreated' => [
             'App\Listeners\ActivityListener@createdTask',
+            'App\Listeners\SubscriptionListener@createdTask',
         ],
         'App\Events\TaskWasUpdated' => [
             'App\Listeners\ActivityListener@updatedTask',
+            'App\Listeners\SubscriptionListener@updatedTask',
         ],
-	];
+        'App\Events\TaskWasRestored' => [
+            'App\Listeners\ActivityListener@restoredTask',
+        ],
+        'App\Events\TaskWasArchived' => [
+            'App\Listeners\ActivityListener@archivedTask',
+        ],
+        'App\Events\TaskWasDeleted' => [
+            'App\Listeners\ActivityListener@deletedTask',
+            'App\Listeners\SubscriptionListener@deletedTask',
+        ],
 
-	/**
-	 * Register any other events for your application.
-	 *
-	 * @param  \Illuminate\Contracts\Events\Dispatcher  $events
-	 * @return void
-	 */
-	public function boot(DispatcherContract $events)
-	{
-		parent::boot($events);
+        // Vendor events
+        'App\Events\VendorWasCreated' => [
+            'App\Listeners\SubscriptionListener@createdVendor',
+        ],
+        'App\Events\VendorWasUpdated' => [
+            'App\Listeners\SubscriptionListener@updatedVendor',
+        ],
+        'App\Events\VendorWasDeleted' => [
+            'App\Listeners\SubscriptionListener@deletedVendor',
+        ],
 
-		//
-	}
+        // Expense events
+        'App\Events\ExpenseWasCreated' => [
+            'App\Listeners\ActivityListener@createdExpense',
+            'App\Listeners\SubscriptionListener@createdExpense',
+        ],
+        'App\Events\ExpenseWasUpdated' => [
+            'App\Listeners\ActivityListener@updatedExpense',
+            'App\Listeners\SubscriptionListener@updatedExpense',
+        ],
+        'App\Events\ExpenseWasRestored' => [
+            'App\Listeners\ActivityListener@restoredExpense',
+        ],
+        'App\Events\ExpenseWasArchived' => [
+            'App\Listeners\ActivityListener@archivedExpense',
+        ],
+        'App\Events\ExpenseWasDeleted' => [
+            'App\Listeners\ActivityListener@deletedExpense',
+            'App\Listeners\SubscriptionListener@deletedExpense',
+        ],
 
+        'Illuminate\Queue\Events\JobExceptionOccurred' => [
+            'App\Listeners\InvoiceListener@jobFailed'
+        ],
+
+        //DNS
+        'App\Events\SubdomainWasUpdated' => [
+            'App\Listeners\DNSListener@addDNSRecord'
+        ]
+
+        /*
+        // Update events
+        \Codedge\Updater\Events\UpdateAvailable::class => [
+            \Codedge\Updater\Listeners\SendUpdateAvailableNotification::class,
+        ],
+        */
+    ];
+
+    /**
+     * Register any other events for your application.
+     *
+     * @param \Illuminate\Contracts\Events\Dispatcher $events
+     *
+     * @return void
+     */
+    public function boot()
+    {
+        parent::boot();
+
+        //
+    }
 }

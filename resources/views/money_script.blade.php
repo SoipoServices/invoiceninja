@@ -5,6 +5,7 @@
     for (var i=0; i<currencies.length; i++) {
         var currency = currencies[i];
         currencyMap[currency.id] = currency;
+        currencyMap[currency.code] = currency;
     }
 
     var countries = {!! \Cache::get('countries') !!};
@@ -13,6 +14,13 @@
         var country = countries[i];
         countryMap[country.id] = country;
     }
+
+    fx.base = 'EUR';
+    fx.rates = {!! cache('currencies')
+                    ->keyBy('code')
+                    ->map(function($item, $key) {
+                        return $item->exchange_rate ?: 1;
+                    }); !!};
 
     var NINJA = NINJA || {};
     @if (Auth::check())
@@ -26,20 +34,30 @@
     @endif
 
     NINJA.parseFloat = function(str) {
-        if (!str) return '';
-        str = (str+'').replace(/[^0-9\.\-]/g, '');
-        
+        if (! str) {
+            return '';
+        } else {
+            str = str + '';
+        }
+
+        // check for comma as decimal separator
+        if (str.match(/,[\d]{1,2}$/)) {
+            str = str.replace(',', '.');
+        }
+
+        str = str.replace(/[^0-9\.\-]/g, '');
+
         return window.parseFloat(str);
     }
 
-    function formatMoneyInvoice(value, invoice, hideSymbol) {
+    function formatMoneyInvoice(value, invoice, decorator, precision) {
         var account = invoice.account;
         var client = invoice.client;
 
-        return formatMoneyAccount(value, account, client, hideSymbol);
+        return formatMoneyAccount(value, account, client, decorator, precision);
     }
 
-    function formatMoneyAccount(value, account, client, hideSymbol) {
+    function formatMoneyAccount(value, account, client, decorator, precision) {
         var currencyId = false;
         var countryId = false;
 
@@ -55,10 +73,39 @@
             countryId = account.country_id;
         }
 
-        return formatMoney(value, currencyId, countryId, hideSymbol)
+        if (account && ! decorator) {
+            decorator = parseInt(account.show_currency_code) ? 'code' : 'symbol';
+        }
+
+        return formatMoney(value, currencyId, countryId, decorator, precision)
     }
 
-    function formatMoney(value, currencyId, countryId, hideSymbol) {
+    function formatAmount(value, currencyId, precision) {
+        if (!value) {
+            return '';
+        }
+
+        if (!currencyId) {
+            currencyId = {{ Session::get(SESSION_CURRENCY, DEFAULT_CURRENCY) }};
+        }
+
+        if (!precision) {
+            precision = 2;
+        }
+
+        var currency = currencyMap[currencyId];
+        var decimal = currency.decimal_separator;
+
+        value = roundToPrecision(NINJA.parseFloat(value), precision) + '';
+
+        if (decimal == '.') {
+            return value;
+        } else {
+            return value.replace('.', decimal);
+        }
+    }
+
+    function formatMoney(value, currencyId, countryId, decorator, precision) {
         value = NINJA.parseFloat(value);
 
         if (!currencyId) {
@@ -66,7 +113,24 @@
         }
 
         var currency = currencyMap[currencyId];
-        var precision = currency.precision;
+
+        if (!currency) {
+            currency = currencyMap[{{ Session::get(SESSION_CURRENCY, DEFAULT_CURRENCY) }}];
+        }
+
+        if (!decorator) {
+            decorator = '{{ Session::get(SESSION_CURRENCY_DECORATOR, CURRENCY_DECORATOR_SYMBOL) }}';
+        }
+
+        if (decorator == 'none') {
+            var parts = (value + '').split('.');
+            precision = parts.length > 1 ? Math.min(4, parts[1].length) : 0;
+        } else if (!precision) {
+            precision = currency.precision;
+        } else if (currency.precision == 0) {
+            precision = 0;
+        }
+
         var thousand = currency.thousand_separator;
         var decimal = currency.decimal_separator;
         var code = currency.code;
@@ -86,9 +150,9 @@
         value = accounting.formatMoney(value, '', precision, thousand, decimal);
         var symbol = currency.symbol;
 
-        if (hideSymbol) {
+        if (decorator == 'none') {
             return value;
-        } else if (!symbol) {
+        } else if (decorator == '{{ CURRENCY_DECORATOR_CODE }}' || ! symbol) {
             return value + ' ' + code;
         } else if (swapSymbol) {
             return value + ' ' + symbol.trim();

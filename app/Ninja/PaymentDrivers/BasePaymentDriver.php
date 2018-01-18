@@ -1,17 +1,24 @@
-<?php namespace App\Ninja\PaymentDrivers;
+<?php
 
-use URL;
-use Session;
-use Request;
-use Omnipay;
-use Exception;
-use CreditCard;
-use DateTime;
-use App\Models\AccountGatewayToken;
+namespace App\Ninja\PaymentDrivers;
+
 use App\Models\Account;
+use App\Models\AccountGatewaySettings;
+use App\Models\AccountGatewayToken;
+use App\Models\Country;
+use App\Models\GatewayType;
+use App\Models\License;
 use App\Models\Payment;
 use App\Models\PaymentMethod;
-use App\Models\Country;
+use Omnipay\Common\Item;
+use CreditCard;
+use DateTime;
+use Exception;
+use Omnipay;
+use Request;
+use Session;
+use URL;
+use Utils;
 
 class BasePaymentDriver
 {
@@ -32,6 +39,8 @@ class BasePaymentDriver
     protected $customerReferenceParam;
     protected $transactionReferenceParam;
 
+    public $canRefundPayments = false;
+
     public function __construct($accountGateway = false, $invitation = false, $gatewayType = false)
     {
         $this->accountGateway = $accountGateway;
@@ -42,6 +51,11 @@ class BasePaymentDriver
     public function isGateway($gatewayId)
     {
         return $this->accountGateway->gateway_id == $gatewayId;
+    }
+
+    public function isValid()
+    {
+        return true;
     }
 
     // optionally pass a paymentMethod to determine the type from the token
@@ -57,7 +71,7 @@ class BasePaymentDriver
     public function gatewayTypes()
     {
         return [
-            GATEWAY_TYPE_CREDIT_CARD
+            GATEWAY_TYPE_CREDIT_CARD,
         ];
     }
 
@@ -114,15 +128,44 @@ class BasePaymentDriver
 
         $gateway = $this->accountGateway->gateway;
 
+        if (! $this->meetsGatewayTypeLimits($this->gatewayType)) {
+            // The customer must have hacked the URL
+            Session::flash('error', trans('texts.limits_not_met'));
+
+            return redirect()->to('view/' . $this->invitation->invitation_key);
+        }
+
+        if (! $this->isGatewayType(GATEWAY_TYPE_TOKEN)) {
+            // apply gateway fees
+            $invoicRepo = app('App\Ninja\Repositories\InvoiceRepository');
+            $invoicRepo->setGatewayFee($this->invoice(), $this->gatewayType);
+        }
+
+        // For these gateway types we use the API directrly rather than Omnipay
+        if ($this->shouldUseSource()) {
+            return $this->createSource();
+        }
+
         if ($this->isGatewayType(GATEWAY_TYPE_TOKEN) || $gateway->is_offsite) {
             if (Session::has('error')) {
                 Session::reflash();
             } else {
                 $this->completeOnsitePurchase();
-                Session::flash('message', trans('texts.applied_payment'));
+                if ($redirectUrl = session('redirect_url:' . $this->invitation->invitation_key)) {
+                    $separator = strpos($redirectUrl, '?') === false ? '?' : '&';
+
+                    return redirect()->to($redirectUrl . $separator . 'invoice_id=' . $this->invoice()->public_id);
+                } else {
+                    Session::flash('message', trans('texts.applied_payment'));
+                }
             }
 
             return redirect()->to('view/' . $this->invitation->invitation_key);
+        }
+
+        $url = 'payment/' . $this->invitation->invitation_key;
+        if (request()->update) {
+            $url .= '?update=true';
         }
 
         $data = [
@@ -130,19 +173,18 @@ class BasePaymentDriver
             'accountGateway' => $this->accountGateway,
             'acceptedCreditCardTypes' => $this->accountGateway->getCreditcardTypes(),
             'gateway' => $gateway,
-            'showAddress' => $this->accountGateway->show_address,
             'showBreadcrumbs' => false,
-            'url' => 'payment/' . $this->invitation->invitation_key,
+            'url' => $url,
             'amount' => $this->invoice()->getRequestedAmount(),
             'invoiceNumber' => $this->invoice()->invoice_number,
             'client' => $this->client(),
             'contact' => $this->invitation->contact,
+            'invitation' => $this->invitation,
             'gatewayType' => $this->gatewayType,
             'currencyId' => $this->client()->getCurrencyId(),
             'currencyCode' => $this->client()->getCurrencyCode(),
             'account' => $this->account(),
             'sourceId' => $sourceId,
-            'clientFontUrl' => $this->account()->getFontsUrl(),
             'tokenize' => $this->tokenize(),
             'transactionToken' => $this->createTransactionToken(),
         ];
@@ -153,12 +195,14 @@ class BasePaymentDriver
     // check if a custom view exists for this provider
     protected function paymentView()
     {
-        $file = sprintf('%s/views/payments/%s/%s.blade.php', resource_path(), $this->providerName(), $this->gatewayType);
+        $gatewayTypeAlias = GatewayType::getAliasFromId($this->gatewayType);
+
+        $file = sprintf('%s/views/payments/%s/%s.blade.php', resource_path(), $this->providerName(), $gatewayTypeAlias);
 
         if (file_exists($file)) {
-            return sprintf('payments.%s/%s', $this->providerName(), $this->gatewayType);
+            return sprintf('payments.%s/%s', $this->providerName(), $gatewayTypeAlias);
         } else {
-            return sprintf('payments.%s', $this->gatewayType);
+            return sprintf('payments.%s', $gatewayTypeAlias);
         }
     }
 
@@ -179,14 +223,13 @@ class BasePaymentDriver
         $rules = [];
 
         if ($this->isGatewayType(GATEWAY_TYPE_CREDIT_CARD)) {
-
             $rules = array_merge($rules, [
                 'first_name' => 'required',
                 'last_name' => 'required',
             ]);
 
             // TODO check this is always true
-            if ( ! $this->tokenize()) {
+            if (! $this->tokenize()) {
                 $rules = array_merge($rules, [
                     'card_number' => 'required',
                     'expiration_month' => 'required',
@@ -232,27 +275,58 @@ class BasePaymentDriver
 
         // load or create token
         if ($this->isGatewayType(GATEWAY_TYPE_TOKEN)) {
-            if ( ! $paymentMethod) {
+            if (! $paymentMethod) {
                 $paymentMethod = PaymentMethod::clientId($this->client()->id)
                     ->wherePublicId($this->sourceId)
                     ->firstOrFail();
             }
-        } elseif ($this->shouldCreateToken()) {
-            $paymentMethod = $this->createToken();
+
+            $invoicRepo = app('App\Ninja\Repositories\InvoiceRepository');
+            $invoicRepo->setGatewayFee($this->invoice(), $paymentMethod->payment_type->gateway_type_id);
+
+            if (! $this->meetsGatewayTypeLimits($paymentMethod->payment_type->gateway_type_id)) {
+                // The customer must have hacked the URL
+                Session::flash('error', trans('texts.limits_not_met'));
+
+                return redirect()->to('view/' . $this->invitation->invitation_key);
+            }
+        } else {
+            if ($this->shouldCreateToken()) {
+                $paymentMethod = $this->createToken();
+            }
+
+            if (! $this->meetsGatewayTypeLimits($this->gatewayType)) {
+                // The customer must have hacked the URL
+                Session::flash('error', trans('texts.limits_not_met'));
+
+                return redirect()->to('view/' . $this->invitation->invitation_key);
+            }
         }
 
-        if ($this->isTwoStep()) {
+        if ($this->isTwoStep() || request()->update) {
             return;
         }
 
         // prepare and process payment
         $data = $this->paymentDetails($paymentMethod);
-        $response = $gateway->purchase($data)->send();
+        // TODO move to payment driver class
+        if ($this->isGateway(GATEWAY_SAGE_PAY_DIRECT) || $this->isGateway(GATEWAY_SAGE_PAY_SERVER)) {
+            $items = null;
+        } else {
+            $items = $this->paymentItems();
+        }
+        $response = $gateway->purchase($data)
+                        ->setItems($items)
+                        ->send();
         $this->purchaseResponse = (array) $response->getData();
 
         // parse the transaction reference
         if ($this->transactionReferenceParam) {
-            $ref = $this->purchaseResponse[$this->transactionReferenceParam];
+            if (! empty($this->purchaseResponse[$this->transactionReferenceParam])) {
+                $ref = $this->purchaseResponse[$this->transactionReferenceParam];
+            } else {
+                throw new Exception($response->getMessage() ?: trans('texts.payment_error'));
+            }
         } else {
             $ref = $response->getTransactionReference();
         }
@@ -262,7 +336,7 @@ class BasePaymentDriver
             $payment = $this->createPayment($ref, $paymentMethod);
 
             // TODO move this to stripe driver
-            if ($this->invitation->invoice->account->account_key == NINJA_ACCOUNT_KEY) {
+            if ($this->invitation->invoice->account->isNinjaAccount()) {
                 Session::flash('trackEventCategory', '/account');
                 Session::flash('trackEventAction', '/buy_pro_plan');
                 Session::flash('trackEventAmount', $payment->amount);
@@ -280,19 +354,57 @@ class BasePaymentDriver
         }
     }
 
+    private function paymentItems()
+    {
+        $invoice = $this->invoice();
+        $items = [];
+        $total = 0;
+
+        foreach ($invoice->invoice_items as $invoiceItem) {
+            // Some gateways require quantity is an integer
+            if (floatval($invoiceItem->qty) != intval($invoiceItem->qty)) {
+                return null;
+            }
+
+            $item = new Item([
+                'name' => $invoiceItem->product_key,
+                'description' => $invoiceItem->notes,
+                'price' => $invoiceItem->cost,
+                'quantity' => $invoiceItem->qty,
+            ]);
+
+            $items[] = $item;
+
+            $total += $invoiceItem->cost * $invoiceItem->qty;
+        }
+
+        if ($total != $invoice->getRequestedAmount()) {
+            $item = new Item([
+                'name' => trans('texts.taxes_and_fees'),
+                'description' => '',
+                'price' => $invoice->getRequestedAmount() - $total,
+                'quantity' => 1,
+            ]);
+
+            $items[] = $item;
+        }
+
+        return $items;
+    }
+
     private function updateClient()
     {
-        if ( ! $this->isGatewayType(GATEWAY_TYPE_CREDIT_CARD)) {
+        if (! $this->isGatewayType(GATEWAY_TYPE_CREDIT_CARD)) {
             return;
         }
 
         // update the contact info
-        if ( ! $this->contact()->getFullName()) {
+        if (! $this->contact()->getFullName()) {
             $this->contact()->first_name = $this->input['first_name'];
             $this->contact()->last_name = $this->input['last_name'];
         }
 
-        if ( ! $this->contact()->email) {
+        if (! $this->contact()->email) {
             $this->contact()->email = $this->input['email'];
         }
 
@@ -300,25 +412,37 @@ class BasePaymentDriver
             $this->contact()->save();
         }
 
-        if ( ! $this->accountGateway->show_address || ! $this->accountGateway->update_address) {
-            return;
-        }
-
         // update the address info
         $client = $this->client();
-        $client->address1 = trim($this->input['address1']);
-        $client->address2 = trim($this->input['address2']);
-        $client->city = trim($this->input['city']);
-        $client->state = trim($this->input['state']);
-        $client->postal_code = trim($this->input['postal_code']);
-        $client->country_id = trim($this->input['country_id']);
-        $client->save();
+
+        if ($this->accountGateway->show_address && $this->accountGateway->update_address) {
+            $client->address1 = trim($this->input['address1']);
+            $client->address2 = trim($this->input['address2']);
+            $client->city = trim($this->input['city']);
+            $client->state = trim($this->input['state']);
+            $client->postal_code = trim($this->input['postal_code']);
+            $client->country_id = trim($this->input['country_id']);
+        }
+
+        if ($this->accountGateway->show_shipping_address) {
+            $client->shipping_address1 = trim($this->input['shipping_address1']);
+            $client->shipping_address2 = trim($this->input['shipping_address2']);
+            $client->shipping_city = trim($this->input['shipping_city']);
+            $client->shipping_state = trim($this->input['shipping_state']);
+            $client->shipping_postal_code = trim($this->input['shipping_postal_code']);
+            $client->shipping_country_id = trim($this->input['shipping_country_id']);
+        }
+
+        if ($client->isDirty()) {
+            $client->save();
+        }
     }
 
     protected function paymentDetails($paymentMethod = false)
     {
         $invoice = $this->invoice();
-        $completeUrl = url('complete/' . $this->invitation->invitation_key . '/' . $this->gatewayType);
+        $gatewayTypeAlias = $this->gatewayType == GATEWAY_TYPE_TOKEN ? $this->gatewayType : GatewayType::getAliasFromId($this->gatewayType);
+        $completeUrl = $this->invitation->getLink('complete', true) . '/' . $gatewayTypeAlias;
 
         $data = [
             'amount' => $invoice->getRequestedAmount(),
@@ -328,7 +452,7 @@ class BasePaymentDriver
             'description' => trans('texts.' . $invoice->getEntityType()) . " {$invoice->invoice_number}",
             'transactionId' => $invoice->invoice_number,
             'transactionType' => 'Purchase',
-            'ip' => Request::ip()
+            'clientIp' => Request::getClientIp(),
         ];
 
         if ($paymentMethod) {
@@ -366,22 +490,23 @@ class BasePaymentDriver
         }
 
         if (isset($input['address1'])) {
-            // TODO use cache instead
-            $country = Country::find($input['country_id']);
+            $hasShippingAddress = $this->accountGateway->show_shipping_address;
+            $country = Utils::getFromCache($input['country_id'], 'countries');
+            $shippingCountry = $hasShippingAddress ? Utils::getFromCache($input['shipping_country_id'], 'countries') : $country;
 
             $data = array_merge($data, [
-                'billingAddress1' => $input['address1'],
-                'billingAddress2' => $input['address2'],
-                'billingCity' => $input['city'],
-                'billingState' => $input['state'],
-                'billingPostcode' => $input['postal_code'],
+                'billingAddress1' => trim($input['address1']),
+                'billingAddress2' => trim($input['address2']),
+                'billingCity' => trim($input['city']),
+                'billingState' => trim($input['state']),
+                'billingPostcode' => trim($input['postal_code']),
                 'billingCountry' => $country->iso_3166_2,
-                'shippingAddress1' => $input['address1'],
-                'shippingAddress2' => $input['address2'],
-                'shippingCity' => $input['city'],
-                'shippingState' => $input['state'],
-                'shippingPostcode' => $input['postal_code'],
-                'shippingCountry' => $country->iso_3166_2
+                'shippingAddress1' => $hasShippingAddress ? trim($this->input['shipping_address1']) : trim($input['address1']),
+                'shippingAddress2' => $hasShippingAddress ? trim($this->input['shipping_address2']) : trim($input['address2']),
+                'shippingCity' => $hasShippingAddress ? trim($this->input['shipping_city']) : trim($input['city']),
+                'shippingState' => $hasShippingAddress ? trim($this->input['shipping_state']) : trim($input['state']),
+                'shippingPostcode' => $hasShippingAddress ? trim($this->input['shipping_postal_code']) : trim($input['postal_code']),
+                'shippingCountry' => $hasShippingAddress ? $shippingCountry->iso_3166_2 : $country->iso_3166_2,
             ]);
         }
 
@@ -393,6 +518,7 @@ class BasePaymentDriver
         $invoice = $this->invoice();
         $client = $this->client();
         $contact = $this->invitation->contact ?: $client->contacts()->first();
+        $hasShippingAddress = $this->accountGateway->show_shipping_address;
 
         return [
             'email' => $contact->email,
@@ -406,14 +532,20 @@ class BasePaymentDriver
             'billingState' => $client->state,
             'billingCountry' => $client->country ? $client->country->iso_3166_2 : '',
             'billingPhone' => $contact->phone,
-            'shippingAddress1' => $client->address1,
-            'shippingAddress2' => $client->address2,
-            'shippingCity' => $client->city,
-            'shippingPostcode' => $client->postal_code,
-            'shippingState' => $client->state,
-            'shippingCountry' => $client->country ? $client->country->iso_3166_2 : '',
+            'shippingAddress1' => $client->shipping_address1 ? $client->shipping_address1 : $client->address1,
+            'shippingAddress2' => $client->shipping_address1 ? $client->shipping_address1 : $client->address2,
+            'shippingCity' => $client->shipping_address1 ? $client->shipping_address1 : $client->city,
+            'shippingPostcode' => $client->shipping_address1 ? $client->shipping_address1 : $client->postal_code,
+            'shippingState' => $client->shipping_address1 ? $client->shipping_address1 : $client->state,
+            'shippingCountry' => $client->shipping_address1 ? ($client->shipping_country ? $client->shipping_country->iso_3166_2 : '') : ($client->country ? $client->country->iso_3166_2 : ''),
             'shippingPhone' => $contact->phone,
         ];
+    }
+
+    public function shouldUseSource()
+    {
+        // Use Omnipay by default
+        return false;
     }
 
     protected function shouldCreateToken()
@@ -422,7 +554,7 @@ class BasePaymentDriver
             return true;
         }
 
-        if ( ! $this->handles(GATEWAY_TYPE_TOKEN)) {
+        if (! $this->handles(GATEWAY_TYPE_TOKEN)) {
             return false;
         }
 
@@ -452,7 +584,7 @@ class BasePaymentDriver
             return $this->customer;
         }
 
-        if ( ! $clientId) {
+        if (! $clientId) {
             $clientId = $this->client()->id;
         }
 
@@ -460,7 +592,7 @@ class BasePaymentDriver
                             ->with('payment_methods')
                             ->first();
 
-        if ($this->customer) {
+        if ($this->customer && $this->invitation) {
             $this->customer = $this->checkCustomerExists($this->customer) ? $this->customer : null;
         }
 
@@ -492,7 +624,7 @@ class BasePaymentDriver
     {
         $account = $this->account();
 
-        if ( ! $customer = $this->customer()) {
+        if (! $customer = $this->customer()) {
             $customer = new AccountGatewayToken();
             $customer->account_id = $account->id;
             $customer->contact_id = $this->invitation->contact_id;
@@ -502,7 +634,6 @@ class BasePaymentDriver
             $customer->save();
         }
 
-        /*
         // archive the old payment method
         $paymentMethod = PaymentMethod::clientId($this->client()->id)
             ->isBankAccount($this->isGatewayType(GATEWAY_TYPE_BANK_TRANSFER))
@@ -511,11 +642,10 @@ class BasePaymentDriver
         if ($paymentMethod) {
             $paymentMethod->delete();
         }
-        */
 
         $paymentMethod = $this->createPaymentMethod($customer);
 
-        if ($paymentMethod && ! $customer->default_payment_method_id) {
+        if ($paymentMethod) {
             $customer->default_payment_method_id = $paymentMethod->id;
             $customer->save();
         }
@@ -538,6 +668,15 @@ class BasePaymentDriver
         $paymentMethod = $this->creatingPaymentMethod($paymentMethod);
 
         if ($paymentMethod) {
+            // archive the old payment method
+            $oldPaymentMethod = PaymentMethod::clientId($this->client()->id)
+                ->wherePaymentTypeId($paymentMethod->payment_type_id)
+                ->first();
+
+            if ($oldPaymentMethod) {
+                $oldPaymentMethod->delete();
+            }
+
             $paymentMethod->save();
         }
 
@@ -551,13 +690,17 @@ class BasePaymentDriver
 
     public function deleteToken()
     {
-
     }
 
     public function createPayment($ref = false, $paymentMethod = null)
     {
+        $account = $this->account();
         $invitation = $this->invitation;
         $invoice = $this->invoice();
+        if (! $invoice->canBePaid()) {
+            return false;
+        }
+        $invoice->markSentIfUnsent();
 
         $payment = Payment::createNew($invitation);
         $payment->invitation_id = $invitation->id;
@@ -567,7 +710,7 @@ class BasePaymentDriver
         $payment->client_id = $invoice->client_id;
         $payment->contact_id = $invitation->contact_id;
         $payment->transaction_reference = $ref;
-        $payment->payment_date = date_create()->format('Y-m-d');
+        $payment->payment_date = $account->getDateTime()->format('Y-m-d');
         $payment->ip = Request::ip();
 
         $payment = $this->creatingPayment($payment, $paymentMethod);
@@ -584,9 +727,13 @@ class BasePaymentDriver
 
         $payment->save();
 
+        $accountKey = $invoice->account->account_key;
+
+        if ($accountKey == env('NINJA_LICENSE_ACCOUNT_KEY')) {
+            $this->createLicense($payment);
         // TODO move this code
         // enable pro plan for hosted users
-        if ($invoice->account->account_key == NINJA_ACCOUNT_KEY) {
+        } elseif ($invoice->account->isNinjaAccount()) {
             foreach ($invoice->invoice_items as $invoice_item) {
                 // Hacky, but invoices don't have meta fields to allow us to store this easily
                 if (1 == preg_match('/^Plan - (.+) \((.+)\)$/', $invoice_item->product_key, $matches)) {
@@ -594,21 +741,25 @@ class BasePaymentDriver
                     $term = strtolower($matches[2]);
                     $price = $invoice_item->cost;
                     if ($plan == PLAN_ENTERPRISE) {
-                        preg_match('/###[\d] [\w]* (\d*)/', $invoice_item->notes, $matches);
-                        $numUsers = $matches[1];
+                        preg_match('/###[\d]* [\w]* (\d*)/', $invoice_item->notes, $numUserMatches);
+                        if (count($numUserMatches)) {
+                            $numUsers = $numUserMatches[1];
+                        } else {
+                            $numUsers = 5;
+                        }
                     } else {
                         $numUsers = 1;
                     }
                 }
             }
 
-            if (!empty($plan)) {
+            if (! empty($plan)) {
                 $account = Account::with('users')->find($invoice->client->public_id);
                 $company = $account->company;
 
-                if(
+                if (
                     $company->plan != $plan
-                    || DateTime::createFromFormat('Y-m-d', $account->company->plan_expires) >= date_create('-7 days')
+                    || DateTime::createFromFormat('Y-m-d', $account->company->plan_expires) <= date_create('-7 days')
                 ) {
                     // Either this is a different plan, or the subscription expired more than a week ago
                     // Reset any grandfathering
@@ -634,11 +785,48 @@ class BasePaymentDriver
                 $company->plan_expires = DateTime::createFromFormat('Y-m-d', $account->company->plan_paid)
                     ->modify($term == PLAN_TERM_MONTHLY ? '+1 month' : '+1 year')->format('Y-m-d');
 
+                if ($company->hasActivePromo()) {
+                    $company->discount_expires = date_create()->modify('1 year')->format('Y-m-d');
+                    $company->promo_expires = null;
+                }
+
                 $company->save();
             }
         }
 
         return $payment;
+    }
+
+    protected function createLicense($payment)
+    {
+        // TODO parse invoice to determine license
+        if ($payment->amount == 20) {
+            $affiliateId = 4;
+            $productId = PRODUCT_WHITE_LABEL;
+        } else {
+            $affiliateId = 1;
+            $productId = PRODUCT_ONE_CLICK_INSTALL;
+        }
+
+        $license = new License();
+        $license->first_name = $this->contact()->first_name;
+        $license->last_name = $this->contact()->last_name;
+        $license->email = $this->contact()->email;
+        $license->transaction_reference = $payment->transaction_reference;
+        $license->license_key = Utils::generateLicense();
+        $license->affiliate_id = $affiliateId;
+        $license->product_id = $productId;
+        $license->save();
+
+        // Add the license key to the invoice content
+        $invoiceItem = $payment->invoice->invoice_items->first();
+        $invoiceItem->notes .= "\n\n#{$license->license_key}";
+        $invoiceItem->save();
+
+        // Add the license key to the redirect URL
+        $key = 'redirect_url:' . $payment->invitation->invitation_key;
+        $redirectUrl = session($key);
+        session([$key => "{$redirectUrl}?license_key={$license->license_key}&product_id={$productId}"]);
     }
 
     protected function creatingPayment($payment, $paymentMethod)
@@ -654,7 +842,7 @@ class BasePaymentDriver
             $amount = $payment->getCompletedAmount();
         }
 
-        if ( ! $amount) {
+        if (! $amount) {
             return false;
         }
 
@@ -697,42 +885,50 @@ class BasePaymentDriver
         return $payment;
     }
 
+    protected function updateClientFromOffsite($transRef, $paymentRef)
+    {
+        // do nothing
+    }
+
     public function completeOffsitePurchase($input)
     {
         $this->input = $input;
-        $ref = array_get($this->input, 'token') ?: $this->invitation->transaction_reference;
+        $transRef = array_get($this->input, 'token') ?: $this->invitation->transaction_reference;
 
         if (method_exists($this->gateway(), 'completePurchase')) {
-
             $details = $this->paymentDetails();
             $response = $this->gateway()->completePurchase($details)->send();
-            $ref = $response->getTransactionReference() ?: $ref;
+            $paymentRef = $response->getTransactionReference() ?: $transRef;
 
             if ($response->isCancelled()) {
                 return false;
-            } elseif ( ! $response->isSuccessful()) {
+            } elseif (! $response->isSuccessful()) {
                 throw new Exception($response->getMessage());
             }
+        } else {
+            $paymentRef = $transRef;
         }
 
+        $this->updateClientFromOffsite($transRef, $paymentRef);
+
         // check invoice still has balance
-        if ( ! floatval($this->invoice()->balance)) {
+        if (! floatval($this->invoice()->balance)) {
             throw new Exception(trans('texts.payment_error_code', ['code' => 'NB']));
         }
 
         // check this isn't a duplicate transaction reference
         if (Payment::whereAccountId($this->invitation->account_id)
-                ->whereTransactionReference($ref)
+                ->whereTransactionReference($paymentRef)
                 ->first()) {
             throw new Exception(trans('texts.payment_error_code', ['code' => 'DT']));
         }
 
-        return $this->createPayment($ref);
+        return $this->createPayment($paymentRef);
     }
 
     public function tokenLinks()
     {
-        if ( ! $this->customer()) {
+        if (! $this->customer()) {
             return [];
         }
 
@@ -741,6 +937,10 @@ class BasePaymentDriver
 
         foreach ($paymentMethods as $paymentMethod) {
             if ($paymentMethod->payment_type_id == PAYMENT_TYPE_ACH && $paymentMethod->status != PAYMENT_METHOD_STATUS_VERIFIED) {
+                continue;
+            }
+
+            if (! $this->meetsGatewayTypeLimits($paymentMethod->payment_type->gateway_type_id)) {
                 continue;
             }
 
@@ -755,8 +955,10 @@ class BasePaymentDriver
             } elseif ($paymentMethod->payment_type_id == PAYMENT_TYPE_PAYPAL) {
                 $label = 'PayPal: ' . $paymentMethod->email;
             } else {
-                $label = trans('texts.use_card_on_file');
+                $label = trans('texts.payment_type_on_file', ['type' => $paymentMethod->payment_type->name]);
             }
+
+            $label .= $this->invoice()->present()->gatewayFee($paymentMethod->payment_type->gateway_type_id);
 
             $links[] = [
                 'url' => $url,
@@ -771,67 +973,76 @@ class BasePaymentDriver
     {
         $links = [];
 
-        foreach ($this->gatewayTypes() as $gatewayType) {
-            if ($gatewayType === GATEWAY_TYPE_TOKEN) {
+        foreach ($this->gatewayTypes() as $gatewayTypeId) {
+            if ($gatewayTypeId === GATEWAY_TYPE_TOKEN) {
                 continue;
             }
 
+            if (! $this->meetsGatewayTypeLimits($gatewayTypeId)) {
+                continue;
+            }
+
+            $gatewayTypeAlias = GatewayType::getAliasFromId($gatewayTypeId);
+
+            if ($gatewayTypeId == GATEWAY_TYPE_CUSTOM) {
+                $url = 'javascript:showCustomModal();';
+                $label = e($this->accountGateway->getConfigField('name'));
+            } else {
+                $url = $this->paymentUrl($gatewayTypeAlias);
+                if ($custom = $this->account()->getLabel($gatewayTypeAlias)) {
+                    $label = $custom;
+                } else {
+                    $label = trans("texts.{$gatewayTypeAlias}");
+                }
+            }
+
+            $label .= $this->invoice()->present()->gatewayFee($gatewayTypeId);
+
             $links[] = [
-                'url' => $this->paymentUrl($gatewayType),
-                'label' => trans("texts.{$gatewayType}")
+                'gatewayTypeId' => $gatewayTypeId,
+                'url' => $url,
+                'label' => $label,
             ];
         }
 
         return $links;
     }
 
-    protected function paymentUrl($gatewayType)
+    public function supportsGatewayType($gatewayTypeId)
     {
-        $account = $this->account();
-        $url = URL::to("/payment/{$this->invitation->invitation_key}/{$gatewayType}");
+        return in_array($gatewayTypeId, $this->gatewayTypes());
+    }
 
-        // PayPal doesn't allow being run in an iframe so we need to open in new tab
-        if ($gatewayType === GATEWAY_TYPE_PAYPAL) {
-            $url .= '#braintree_paypal';
+    protected function meetsGatewayTypeLimits($gatewayTypeId)
+    {
+        if (! $gatewayTypeId) {
+            return true;
+        }
 
-            if ($account->iframe_url) {
-                return 'javascript:window.open("' . $url . '", "_blank")';
+        $accountGatewaySettings = AccountGatewaySettings::scope(false, $this->invitation->account_id)
+            ->where('account_gateway_settings.gateway_type_id', '=', $gatewayTypeId)->first();
+
+        if ($accountGatewaySettings) {
+            $invoice = $this->invoice();
+
+            if ($accountGatewaySettings->min_limit !== null && $invoice->balance < $accountGatewaySettings->min_limit) {
+                return false;
+            }
+
+            if ($accountGatewaySettings->max_limit !== null && $invoice->balance > $accountGatewaySettings->max_limit) {
+                return false;
             }
         }
 
-        return $url;
+        return true;
     }
 
-    protected function parseCardType($cardName) {
-        $cardTypes = [
-            'visa' => PAYMENT_TYPE_VISA,
-            'americanexpress' => PAYMENT_TYPE_AMERICAN_EXPRESS,
-            'amex' => PAYMENT_TYPE_AMERICAN_EXPRESS,
-            'mastercard' => PAYMENT_TYPE_MASTERCARD,
-            'discover' => PAYMENT_TYPE_DISCOVER,
-            'jcb' => PAYMENT_TYPE_JCB,
-            'dinersclub' => PAYMENT_TYPE_DINERS,
-            'carteblanche' => PAYMENT_TYPE_CARTE_BLANCHE,
-            'chinaunionpay' => PAYMENT_TYPE_UNIONPAY,
-            'unionpay' => PAYMENT_TYPE_UNIONPAY,
-            'laser' => PAYMENT_TYPE_LASER,
-            'maestro' => PAYMENT_TYPE_MAESTRO,
-            'solo' => PAYMENT_TYPE_SOLO,
-            'switch' => PAYMENT_TYPE_SWITCH
-        ];
+    protected function paymentUrl($gatewayTypeAlias)
+    {
+        $account = $this->account();
+        $url = URL::to("/payment/{$this->invitation->invitation_key}/{$gatewayTypeAlias}");
 
-        $cardName = strtolower(str_replace([' ', '-', '_'], '', $cardName));
-
-        if (empty($cardTypes[$cardName]) && 1 == preg_match('/^('.implode('|', array_keys($cardTypes)).')/', $cardName, $matches)) {
-            // Some gateways return extra stuff after the card name
-            $cardName = $matches[1];
-        }
-
-        if (!empty($cardTypes[$cardName])) {
-            return $cardTypes[$cardName];
-        } else {
-            return PAYMENT_TYPE_CREDIT_CARD_OTHER;
-        }
+        return $url;
     }
 
     public function handleWebHook($input)

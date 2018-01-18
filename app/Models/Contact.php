@@ -1,22 +1,40 @@
-<?php namespace App\Models;
+<?php
 
+namespace App\Models;
 
-use Illuminate\Database\Eloquent\SoftDeletes;
+use Utils;
 use Illuminate\Auth\Authenticatable;
 use Illuminate\Auth\Passwords\CanResetPassword;
 use Illuminate\Contracts\Auth\Authenticatable as AuthenticatableContract;
 use Illuminate\Contracts\Auth\CanResetPassword as CanResetPasswordContract;
+use Illuminate\Database\Eloquent\SoftDeletes;
+use App\Models\LookupContact;
+use Illuminate\Notifications\Notifiable;
 
 /**
- * Class Contact
+ * Class Contact.
  */
 class Contact extends EntityModel implements AuthenticatableContract, CanResetPasswordContract
 {
-    use SoftDeletes, Authenticatable, CanResetPassword;
+    use SoftDeletes;
+    use Authenticatable;
+    use CanResetPassword;
+    use Notifiable;
+
+    protected $guard = 'client';
+
     /**
      * @var array
      */
     protected $dates = ['deleted_at'];
+
+    /**
+     * @return mixed
+     */
+    public function getEntityType()
+    {
+        return ENTITY_CONTACT;
+    }
 
     /**
      * @var array
@@ -27,6 +45,18 @@ class Contact extends EntityModel implements AuthenticatableContract, CanResetPa
         'email',
         'phone',
         'send_invoice',
+        'custom_value1',
+        'custom_value2',
+    ];
+
+    /**
+     * The attributes excluded from the model's JSON form.
+     *
+     * @var array
+     */
+    protected $hidden = [
+        'remember_token',
+        'confirmation_code',
     ];
 
     /**
@@ -103,14 +133,16 @@ class Contact extends EntityModel implements AuthenticatableContract, CanResetPa
 
     /**
      * @param $contact_key
+     *
      * @return mixed
      */
     public function getContactKeyAttribute($contact_key)
     {
         if (empty($contact_key) && $this->id) {
-            $this->contact_key = $contact_key = str_random(RANDOM_KEY_LENGTH);
+            $this->contact_key = $contact_key = strtolower(str_random(RANDOM_KEY_LENGTH));
             static::where('id', $this->id)->update(['contact_key' => $contact_key]);
         }
+
         return $contact_key;
     }
 
@@ -120,7 +152,7 @@ class Contact extends EntityModel implements AuthenticatableContract, CanResetPa
     public function getFullName()
     {
         if ($this->first_name || $this->last_name) {
-            return $this->first_name.' '.$this->last_name;
+            return trim($this->first_name.' '.$this->last_name);
         } else {
             return '';
         }
@@ -131,6 +163,45 @@ class Contact extends EntityModel implements AuthenticatableContract, CanResetPa
      */
     public function getLinkAttribute()
     {
-        return \URL::to('client/dashboard/' . $this->contact_key);
+        if (! $this->account) {
+            $this->load('account');
+        }
+
+        $account = $this->account;
+        $url = trim(SITE_URL, '/');
+
+        if ($account->hasFeature(FEATURE_CUSTOM_URL)) {
+            if (Utils::isNinjaProd() && ! Utils::isReseller()) {
+                $url = $account->present()->clientPortalLink();
+            }
+
+            if ($this->account->subdomain) {
+                $url = Utils::replaceSubdomain($url, $account->subdomain);
+            }
+        }
+
+        return "{$url}/client/dashboard/{$this->contact_key}";
+    }
+
+    public function sendPasswordResetNotification($token)
+    {
+        //$this->notify(new ResetPasswordNotification($token));
+        app('App\Ninja\Mailers\ContactMailer')->sendPasswordReset($this, $token);
     }
 }
+
+Contact::creating(function ($contact)
+{
+    LookupContact::createNew($contact->account->account_key, [
+        'contact_key' => $contact->contact_key,
+    ]);
+});
+
+Contact::deleted(function ($contact)
+{
+    if ($contact->forceDeleting) {
+        LookupContact::deleteWhere([
+            'contact_key' => $contact->contact_key,
+        ]);
+    }
+});

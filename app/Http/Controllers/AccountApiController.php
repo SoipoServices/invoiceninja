@@ -1,17 +1,25 @@
-<?php namespace App\Http\Controllers;
+<?php
 
-use Auth;
-use Utils;
-use Response;
-use Cache;
-use App\Models\Account;
-use App\Ninja\Repositories\AccountRepository;
-use Illuminate\Http\Request;
-use App\Ninja\Transformers\AccountTransformer;
-use App\Ninja\Transformers\UserAccountTransformer;
+namespace App\Http\Controllers;
+
 use App\Events\UserSignedUp;
 use App\Http\Requests\RegisterRequest;
 use App\Http\Requests\UpdateAccountRequest;
+use App\Models\Account;
+use App\Models\User;
+use App\Ninja\OAuth\OAuth;
+use App\Ninja\Repositories\AccountRepository;
+use App\Ninja\Transformers\AccountTransformer;
+use App\Ninja\Transformers\UserAccountTransformer;
+use App\Services\AuthService;
+use Auth;
+use Cache;
+use Exception;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
+use Response;
+use Socialite;
+use Utils;
 
 class AccountApiController extends BaseAPIController
 {
@@ -24,7 +32,7 @@ class AccountApiController extends BaseAPIController
         $this->accountRepo = $accountRepo;
     }
 
-    public function ping()
+    public function ping(Request $request)
     {
         $headers = Utils::getApiHeaders();
 
@@ -33,11 +41,14 @@ class AccountApiController extends BaseAPIController
 
     public function register(RegisterRequest $request)
     {
+        if (! \App\Models\LookupUser::validateField('email', $request->email)) {
+            return $this->errorResponse(['message' => trans('texts.email_taken')], 500);
+        }
 
         $account = $this->accountRepo->create($request->first_name, $request->last_name, $request->email, $request->password);
         $user = $account->users()->first();
 
-        Auth::login($user, true);
+        Auth::login($user);
         event(new UserSignedUp());
 
         return $this->processLogin($request);
@@ -45,11 +56,27 @@ class AccountApiController extends BaseAPIController
 
     public function login(Request $request)
     {
+        $user = User::where('email', '=', $request->email)->first();
+
+        if ($user && $user->failed_logins >= MAX_FAILED_LOGINS) {
+            sleep(ERROR_DELAY);
+            return $this->errorResponse(['message' => 'Invalid credentials'], 401);
+        }
+
         if (Auth::attempt(['email' => $request->email, 'password' => $request->password])) {
+            if ($user && $user->failed_logins > 0) {
+                $user->failed_logins = 0;
+                $user->save();
+            }
             return $this->processLogin($request);
         } else {
+            error_log('login failed');
+            if ($user) {
+                $user->failed_logins = $user->failed_logins + 1;
+                $user->save();
+            }
             sleep(ERROR_DELAY);
-            return $this->errorResponse(['message'=>'Invalid credentials'],401);
+            return $this->errorResponse(['message' => 'Invalid credentials'], 401);
         }
     }
 
@@ -65,14 +92,14 @@ class AccountApiController extends BaseAPIController
 
         return $this->response($data);
     }
-
+    
     public function show(Request $request)
     {
         $account = Auth::user()->account;
         $updatedAt = $request->updated_at ? date('Y-m-d H:i:s', $request->updated_at) : false;
 
         $transformer = new AccountTransformer(null, $request->serializer);
-        $account->load($transformer->getDefaultIncludes());
+        $account->load(array_merge($transformer->getDefaultIncludes(), ['projects.client']));
         $account = $this->createItem($account, $transformer, 'account');
 
         return $this->response($account);
@@ -92,7 +119,13 @@ class AccountApiController extends BaseAPIController
 
     public function getUserAccounts(Request $request)
     {
-        return $this->processLogin($request);
+        $user = Auth::user();
+
+        $users = $this->accountRepo->findUsers($user, 'account.account_tokens');
+        $transformer = new UserAccountTransformer($user->account, $request->serializer, $request->token_name);
+        $data = $this->createCollection($users, $transformer, 'user_account');
+
+        return $this->response($data);
     }
 
     public function update(UpdateAccountRequest $request)
@@ -111,20 +144,19 @@ class AccountApiController extends BaseAPIController
         $account = Auth::user()->account;
 
         //scan if this user has a token already registered (tokens can change, so we need to use the users email as key)
-        $devices = json_decode($account->devices,TRUE);
+        $devices = json_decode($account->devices, true);
 
-
-            for($x=0; $x<count($devices); $x++)
-            {
-                if ($devices[$x]['email'] == Auth::user()->username) {
-                    $devices[$x]['token'] = $request->token; //update
+        for ($x = 0; $x < count($devices); $x++) {
+            if ($devices[$x]['email'] == $request->email) {
+                $devices[$x]['token'] = $request->token; //update
+                $devices[$x]['device'] = $request->device;
                     $account->devices = json_encode($devices);
-                    $account->save();
-                    $devices[$x]['account_key'] = $account->account_key;
+                $account->save();
+                $devices[$x]['account_key'] = $account->account_key;
 
-                    return $this->response($devices[$x]);
-                }
+                return $this->response($devices[$x]);
             }
+        }
 
         //User does not have a device, create new record
 
@@ -133,10 +165,10 @@ class AccountApiController extends BaseAPIController
             'email' => $request->email,
             'device' => $request->device,
             'account_key' => $account->account_key,
-            'notify_sent' => TRUE,
-            'notify_viewed' => TRUE,
-            'notify_approved' => TRUE,
-            'notify_paid' => TRUE,
+            'notify_sent' => true,
+            'notify_viewed' => true,
+            'notify_approved' => true,
+            'notify_paid' => true,
         ];
 
         $devices[] = $newDevice;
@@ -144,23 +176,40 @@ class AccountApiController extends BaseAPIController
         $account->save();
 
         return $this->response($newDevice);
+    }
 
+    public function removeDeviceToken(Request $request) {
+
+        $account = Auth::user()->account;
+
+        $devices = json_decode($account->devices, true);
+
+        foreach($devices as $key => $value)
+        {
+
+            if($request->token == $value['token'])
+                unset($devices[$key]);
+
+        }
+
+        $account->devices = json_encode(array_values($devices));
+        $account->save();
+
+        return $this->response(['success']);
     }
 
     public function updatePushNotifications(Request $request)
     {
         $account = Auth::user()->account;
 
-        $devices = json_decode($account->devices, TRUE);
+        $devices = json_decode($account->devices, true);
 
-        if(count($devices) < 1)
-            return $this->errorResponse(['message'=>'No registered devices.'], 400);
+        if (count($devices) < 1) {
+            return $this->errorResponse(['message' => 'No registered devices.'], 400);
+        }
 
-        for($x=0; $x<count($devices); $x++)
-        {
-            if($devices[$x]['email'] == Auth::user()->username)
-            {
-
+        for ($x = 0; $x < count($devices); $x++) {
+            if ($devices[$x]['email'] == Auth::user()->username) {
                 $newDevice = [
                     'token' => $devices[$x]['token'],
                     'email' => $devices[$x]['email'],
@@ -179,6 +228,30 @@ class AccountApiController extends BaseAPIController
                 return $this->response($newDevice);
             }
         }
+    }
+
+    public function oauthLogin(Request $request)
+    {
+        $user = false;
+        $token = $request->input('token');
+        $provider = $request->input('provider');
+
+        $oAuth = new OAuth();
+        $user = $oAuth->getProvider($provider)->getTokenResponse($token);
+
+        if ($user) {
+            Auth::login($user);
+            return $this->processLogin($request);
+        }
+        else
+            return $this->errorResponse(['message' => 'Invalid credentials'], 401);
 
     }
+
+    public function iosSubscriptionStatus() {
+
+        //stubbed for iOS callbacks
+        
+    }
+
 }

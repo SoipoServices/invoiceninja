@@ -1,13 +1,25 @@
-<?php namespace App\Ninja\PaymentDrivers;
+<?php
+
+namespace App\Ninja\PaymentDrivers;
+
+use Request;
 
 class PayFastPaymentDriver extends BasePaymentDriver
 {
     protected $transactionReferenceParam = 'm_payment_id';
 
+    protected function paymentDetails($paymentMethod = false)
+    {
+        $data = parent::paymentDetails();
+        $data['notifyUrl'] = $this->invitation->getLink('complete', true);
+
+        return $data;
+    }
+
     public function completeOffsitePurchase($input)
     {
-        if ($accountGateway->isGateway(GATEWAY_PAYFAST) && Request::has('pt')) {
-            $token = Request::query('pt');
-        }
+        parent::completeOffsitePurchase([
+            'token' => Request::query('pt'),
+        ]);
     }
 }
